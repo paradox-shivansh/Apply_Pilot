@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Spring Boot Bridge",
+  "version": "1.0",
+  "description": "Bridge between popup, background service worker, content script, and Spring Boot",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://localhost:8080/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
