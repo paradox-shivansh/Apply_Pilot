@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Spring Boot Bridge",
+  "name": "Nightmare Spell",
   "version": "1.0",
   "description": "Bridge between popup, background service worker, content script, and Spring Boot",
   "permissions": [
