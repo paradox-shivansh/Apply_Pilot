@@ -1,15 +1,17 @@
 package org.dreamers.aipilot.exceptions;
-import org.springframework.http.HttpStatusCode;
+
+import org.springframework.http.HttpStatus;
 
 public class AiProviderException extends RuntimeException {
-    private final HttpStatusCode statusCode;
 
-    public AiProviderException(HttpStatusCode statusCode, String message) {
+    private final HttpStatus status;
+
+    public AiProviderException(HttpStatus status, String message) {
         super(message);
-        this.statusCode = statusCode;
+        this.status = status;
     }
 
-    public HttpStatusCode getStatusCode() {
-        return statusCode;
+    public HttpStatus getStatus() {
+        return status;
     }
 }

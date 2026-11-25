@@ -89,3 +89,98 @@ runAiBtn.addEventListener("click", () => {
         aiResultEl.textContent = JSON.stringify(res.data, null, 2);
     });
 });
+
+const resumeFileInput = document.getElementById("resumeFileInput");
+const uploadResumeBtn = document.getElementById("uploadResumeBtn");
+const loadResumeBtn = document.getElementById("loadResumeBtn");
+const resumeStatusEl = document.getElementById("resumeStatus");
+const resumePreviewEl = document.getElementById("resumePreview");
+
+async function getOrCreateLocalUserId() {
+    const data = await chrome.storage.local.get(["localUserId"]);
+    if (data.localUserId) return data.localUserId;
+    const newId = "user_" + crypto.randomUUID().slice(0, 8);
+    await chrome.storage.local.set({ localUserId: newId });
+    return newId;
+}
+
+function renderProfile(profileObj) {
+    resumePreviewEl.textContent = typeof profileObj === "string"
+        ? profileObj
+        : JSON.stringify(profileObj, null, 2);
+}
+
+async function loadSavedResume() {
+    const userId = await getOrCreateLocalUserId();
+    const cacheKey = `resumeProfile_${userId}`;
+
+    // 1. Show local cache immediately if present
+    const cached = await chrome.storage.local.get([cacheKey]);
+    if (cached[cacheKey]) {
+        renderProfile(cached[cacheKey]);
+    }
+
+    // 2. Fetch latest from backend for this userId
+    try {
+        const res = await fetch(`http://localhost:8080/api/resume?userId=${encodeURIComponent(userId)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const parsed = JSON.parse(data.parsedJson);
+        await chrome.storage.local.set({ [cacheKey]: parsed });
+        renderProfile(parsed);
+    } catch {
+        // Keep local cached profile if offline
+    }
+}
+
+uploadResumeBtn.addEventListener("click", async () => {
+    const file = resumeFileInput.files[0];
+    if (!file) {
+        resumeStatusEl.textContent = "Choose a PDF file first.";
+        return;
+    }
+
+    uploadResumeBtn.disabled = true;
+    resumeStatusEl.textContent = "Extracting & parsing resume...";
+
+    try {
+        const userId = await getOrCreateLocalUserId();
+        const prefs = await chrome.storage.local.get(["aiProvider", "apiKey"]);
+
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("userId", userId);
+        formData.append("provider", prefs.aiProvider || "gemini");
+        formData.append("apiKey", prefs.apiKey || "");
+
+        const response = await fetch("http://localhost:8080/api/resume/upload", {
+            method: "POST",
+            body: formData
+        });
+
+        const bodyText = await response.text();
+        let result;
+        try {
+            result = JSON.parse(bodyText);
+        } catch {
+            result = { message: bodyText };
+        }
+
+        if (!response.ok) {
+            resumeStatusEl.textContent = `Error (${response.status}): ${result.message || "Upload failed"}`;
+            return;
+        }
+
+        const parsedProfile = JSON.parse(result.parsedJson);
+        await chrome.storage.local.set({ [`resumeProfile_${userId}`]: parsedProfile });
+        renderProfile(parsedProfile);
+        resumeStatusEl.textContent = `Saved (${result.fileName})`;
+    } catch (err) {
+        resumeStatusEl.textContent = `Upload error: ${err.message}`;
+    } finally {
+        uploadResumeBtn.disabled = false;
+    }
+});
+
+loadResumeBtn.addEventListener("click", loadSavedResume);
+loadSavedResume();
