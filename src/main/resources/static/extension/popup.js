@@ -444,3 +444,109 @@ async function runResumeMatch(bypassCache = false) {
 }
 matchResumeBtn.addEventListener("click", () => runResumeMatch(false));
 forceMatchBtn.addEventListener("click", () => runResumeMatch(true));
+
+const autofillBtn = document.getElementById("autofillBtn");
+const autofillStatusEl = document.getElementById("autofillStatus");
+
+async function getContentScriptHelper(tabId, message) {
+    try {
+        const res = await chrome.tabs.sendMessage(tabId, message);
+        if (res) return res;
+    } catch {
+        // Inject content.js if not yet attached to tab
+    }
+
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"]
+    });
+
+    return await chrome.tabs.sendMessage(tabId, message);
+}
+
+autofillBtn.addEventListener("click", async () => {
+    autofillStatusEl.textContent = "Scanning form fields...";
+    autofillBtn.disabled = true;
+
+    try {
+        const tab = await getActiveTab();
+        if (!tab || !tab.id) {
+            autofillStatusEl.textContent = "No active tab found.";
+            return;
+        }
+
+        const scanRes = await getContentScriptHelper(tab.id, { type: "SCAN_FORM_FIELDS" });
+        if (!scanRes || !scanRes.ok || !scanRes.fields || scanRes.fields.length === 0) {
+            autofillStatusEl.textContent = "No visible input, textarea, or select fields found on this page.";
+            return;
+        }
+
+        const userId = await getOrCreateLocalUserId();
+        const resumeCacheKey = `resumeProfile_${userId}`;
+        const matchCacheKey = `matchCache_${userId}_${scanRes.jobUrl}`;
+
+        const storageData = await chrome.storage.local.get([
+            "aiProvider",
+            "apiKey",
+            resumeCacheKey,
+            matchCacheKey
+        ]);
+
+        const cachedResume = storageData[resumeCacheKey];
+        const resumeJson = cachedResume
+            ? (typeof cachedResume === "string" ? cachedResume : JSON.stringify(cachedResume))
+            : "";
+
+        const cachedMatch = storageData[matchCacheKey];
+        const missingSkills = Array.isArray(cachedMatch?.missingSkills)
+            ? cachedMatch.missingSkills
+            : [];
+
+        autofillStatusEl.textContent = `Mapping ${scanRes.fields.length} fields...`;
+
+        const response = await fetch("http://localhost:8080/api/map-fields", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-AI-API-Key": storageData.apiKey || ""
+            },
+            body: JSON.stringify({
+                userId,
+                jobUrl: scanRes.jobUrl,
+                jobTitle: scanRes.jobTitle || "",
+                companyName: scanRes.companyName || "",
+                provider: storageData.aiProvider || "gemini",
+                resumeJson,
+                missingSkills,
+                fields: scanRes.fields
+            })
+        });
+
+        const bodyText = await response.text();
+        let mapped;
+        try {
+            mapped = JSON.parse(bodyText);
+        } catch {
+            mapped = { message: bodyText };
+        }
+
+        if (!response.ok) {
+            autofillStatusEl.textContent = `Error (${response.status}): ${mapped.message || "Field mapping failed"}`;
+            return;
+        }
+
+        const applyRes = await chrome.tabs.sendMessage(tab.id, {
+            type: "APPLY_AUTOFILL",
+            mapping: mapped
+        });
+
+        const count = applyRes?.filledCount ?? 0;
+        autofillStatusEl.textContent = count > 0
+            ? `Filled ${count} field(s). Please review before submitting.`
+            : "No matching fields could be filled.";
+    } catch (err) {
+        autofillStatusEl.textContent = `Error: ${err.message}`;
+    } finally {
+        autofillBtn.disabled = false;
+    }
+});

@@ -2,7 +2,125 @@ if (!window.__aiPilotContentLoaded) {
     window.__aiPilotContentLoaded = true;
 
     console.log("Spring Boot Bridge content script loaded on:", window.location.href);
+    const fieldElementRegistry = new Map();
 
+    function isElementVisible(el) {
+        if (!el || el.disabled || el.readOnly) return false;
+        const type = (el.type || "").toLowerCase();
+        if (type === "hidden" || type === "password" || type === "file" || type === "submit" || type === "button") {
+            return false;
+        }
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) {
+            return false;
+        }
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function getAssociatedLabelText(el) {
+        if (el.labels && el.labels.length > 0) {
+            const joined = [...el.labels].map((l) => l.innerText.trim()).filter(Boolean).join(" ");
+            if (joined) return joined;
+        }
+        if (el.id) {
+            const safeId = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(el.id) : el.id;
+            const explicitLabel = document.querySelector(`label[for="${safeId}"]`);
+            if (explicitLabel && explicitLabel.innerText.trim()) {
+                return explicitLabel.innerText.trim();
+            }
+        }
+        const parentLabel = el.closest("label");
+        if (parentLabel && parentLabel.innerText.trim()) {
+            return parentLabel.innerText.trim();
+        }
+        // Fallback for custom form blocks where label sits in a sibling/parent container
+        const container = el.closest(".form-group, .field, [class*='field'], [class*='input']") || el.parentElement;
+        if (container) {
+            const labelCandidate = container.querySelector("label, [class*='label']");
+            if (labelCandidate && labelCandidate.innerText.trim()) {
+                return labelCandidate.innerText.trim();
+            }
+        }
+        return "";
+    }
+
+    function scanFormFields() {
+        fieldElementRegistry.clear();
+        const candidates = [...document.querySelectorAll("input, textarea, select")];
+        const descriptors = [];
+        let counter = 1;
+
+        for (const el of candidates) {
+            if (!isElementVisible(el)) continue;
+
+            const fieldId = `field_${counter++}`;
+            fieldElementRegistry.set(fieldId, el);
+
+            const tag = el.tagName.toLowerCase();
+            const options = tag === "select"
+                ? [...el.options].map((o) => (o.text || o.value || "").trim()).filter(Boolean).slice(0, 40)
+                : [];
+
+            descriptors.push({
+                fieldId,
+                tag,
+                type: (el.type || tag).toLowerCase(),
+                id: el.id || "",
+                name: el.name || "",
+                placeholder: el.placeholder || "",
+                ariaLabel: el.getAttribute("aria-label") || "",
+                labelText: getAssociatedLabelText(el),
+                options
+            });
+        }
+
+        return descriptors;
+    }
+
+    function setNativeValue(el, value) {
+        const tag = el.tagName.toLowerCase();
+        if (tag === "select") {
+            const lowerVal = String(value).toLowerCase().trim();
+            const matchedOption = [...el.options].find(
+                (opt) =>
+                    opt.value.toLowerCase().trim() === lowerVal ||
+                    opt.text.toLowerCase().trim() === lowerVal ||
+                    opt.text.toLowerCase().includes(lowerVal)
+            );
+            if (matchedOption) {
+                el.value = matchedOption.value;
+            } else {
+                el.value = value;
+            }
+        } else {
+            const proto = tag === "textarea"
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+            if (descriptor && typeof descriptor.set === "function") {
+                descriptor.set.call(el, value);
+            } else {
+                el.value = value;
+            }
+        }
+
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
+    function applyAutofillMapping(mapping) {
+        let filledCount = 0;
+        for (const [fieldId, val] of Object.entries(mapping || {})) {
+            const el = fieldElementRegistry.get(fieldId);
+            if (!el || !document.contains(el) || !isElementVisible(el)) continue;
+            if (typeof val !== "string" || !val.trim()) continue;
+
+            setNativeValue(el, val.trim());
+            filledCount++;
+        }
+        return filledCount;
+    }
     function normalizeJobUrl(rawUrl) {
         try {
             const u = new URL(rawUrl);
@@ -23,11 +141,19 @@ if (!window.__aiPilotContentLoaded) {
             url.includes("indeed.com/viewjob") ||
             url.includes("indeed.co.in/viewjob") ||
             url.includes("internshala.com/internship/detail") ||
-            url.includes("internshala.com/job/detail");
+            url.includes("internshala.com/job/detail") ||
+            url.includes("test-job") ||
+            url.includes("scam-job");
 
         const bodyText = document.body ? document.body.innerText : "";
-        const hasJdKeyword = /job description/i.test(bodyText);
-        const hasApplyKeyword = /\bapply now\b/i.test(bodyText);
+        const hasJdKeyword =
+            /(job description|about the role|role overview|responsibilities|qualifications|hiring|vacancy|internship)/i.test(
+                bodyText
+            );
+        const hasApplyKeyword =
+            /\b(apply now|apply here|apply for this role|submit application|send resume|apply)\b/i.test(
+                bodyText
+            );
 
         return portalMatch || (hasJdKeyword && hasApplyKeyword);
     }
@@ -127,6 +253,24 @@ if (!window.__aiPilotContentLoaded) {
         if (message.type === "RENDER_SCAM_BADGE") {
             injectPageBadge(message.verdict, message.scamScore);
             sendResponse({ ok: true });
+            return false;
+        }
+        if (message.type === "SCAN_FORM_FIELDS") {
+            const fields = scanFormFields();
+            sendResponse({
+                ok: true,
+                jobUrl: normalizeJobUrl(window.location.href),
+                jobTitle: document.querySelector("h1")?.innerText.trim() || document.title.trim(),
+                companyName: document.querySelector('[class*="company"], [data-company-name], [class*="employer"]')
+                    ?.innerText.trim().split("\n")[0] || "",
+                fields
+            });
+            return false;
+        }
+
+        if (message.type === "APPLY_AUTOFILL") {
+            const filledCount = applyAutofillMapping(message.mapping || {});
+            sendResponse({ ok: true, filledCount });
             return false;
         }
 
