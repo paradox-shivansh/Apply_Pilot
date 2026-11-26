@@ -173,6 +173,9 @@ uploadResumeBtn.addEventListener("click", async () => {
 
         const parsedProfile = JSON.parse(result.parsedJson);
         await chrome.storage.local.set({ [`resumeProfile_${userId}`]: parsedProfile });
+        const allStorage = await chrome.storage.local.get(null);
+        const staleKeys = Object.keys(allStorage).filter((k) => k.startsWith(`matchCache_${userId}_`));
+        if (staleKeys.length) await chrome.storage.local.remove(staleKeys);
         renderProfile(parsedProfile);
         resumeStatusEl.textContent = `Saved (${result.fileName})`;
     } catch (err) {
@@ -301,3 +304,143 @@ async function runJobAnalysis(bypassCache = false) {
 
 analyzeJobBtn.addEventListener("click", () => runJobAnalysis(false));
 forceAnalyzeBtn.addEventListener("click", () => runJobAnalysis(true));
+
+
+const matchResumeBtn = document.getElementById("matchResumeBtn");
+const forceMatchBtn = document.getElementById("forceMatchBtn");
+const matchStatusEl = document.getElementById("matchStatus");
+const matchResultEl = document.getElementById("matchResult");
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function renderMatchReport(report, fromCache) {
+    const score = Number(report.matchScore) || 0;
+    const scoreColor = score >= 75 ? "#22c55e" : score >= 50 ? "#eab308" : "#ef4444";
+
+    const matchingTags = (report.matchingSkills || [])
+        .map(
+            (s) =>
+                `<span style="display:inline-block;background:#14532d;color:#dcfce7;padding:2px 6px;border-radius:4px;margin:2px;font-size:11px;">${escapeHtml(s)}</span>`
+        )
+        .join("");
+
+    const missingTags = (report.missingSkills || [])
+        .map(
+            (s) =>
+                `<span style="display:inline-block;background:#7f1d1d;color:#fee2e2;padding:2px 6px;border-radius:4px;margin:2px;font-size:11px;">${escapeHtml(s)}</span>`
+        )
+        .join("");
+
+    const suggestionsList = (report.suggestions || [])
+        .map((tip) => `<li>${escapeHtml(tip)}</li>`)
+        .join("");
+
+    matchResultEl.innerHTML = `
+    <div style="margin-bottom:6px;">
+      <strong>Resume Match:</strong>
+      <span style="color:${scoreColor};font-weight:700;">${score}%</span>
+      ${fromCache ? "<em>(cached)</em>" : ""}
+    </div>
+    <div style="margin-bottom:6px;">
+      <strong>Missing Keywords to Add:</strong><br/>
+      ${missingTags || "<em>None — strong keyword coverage!</em>"}
+    </div>
+    <div style="margin-bottom:6px;">
+      <strong>Matching Skills:</strong><br/>
+      ${matchingTags || "<em>No direct matches detected</em>"}
+    </div>
+    ${
+        suggestionsList
+            ? `<div><strong>Suggestions:</strong><ul style="padding-left:18px;margin:4px 0;">${suggestionsList}</ul></div>`
+            : ""
+    }
+  `;
+}
+
+async function runResumeMatch(bypassCache = false) {
+    matchStatusEl.textContent = "Scraping job & checking resume...";
+    matchResumeBtn.disabled = true;
+    forceMatchBtn.disabled = true;
+
+    try {
+        const tab = await getActiveTab();
+        if (!tab || !tab.id) {
+            matchStatusEl.textContent = "No active tab found.";
+            return;
+        }
+
+        const scrapeRes = await getJobFromTab(tab.id);
+        if (!scrapeRes || !scrapeRes.ok) {
+            matchStatusEl.textContent = scrapeRes?.error || "Unable to read job details from this tab.";
+            return;
+        }
+
+        const userId = await getOrCreateLocalUserId();
+        const job = scrapeRes.job;
+        const cacheKey = `matchCache_${userId}_${job.jobUrl}`;
+
+        if (!bypassCache) {
+            const cached = await chrome.storage.local.get([cacheKey]);
+            if (cached[cacheKey]) {
+                renderMatchReport(cached[cacheKey], true);
+                matchStatusEl.textContent = "Loaded match from local cache.";
+                return;
+            }
+        }
+
+        matchStatusEl.textContent = "Comparing resume against JD...";
+        const resumeCacheKey = `resumeProfile_${userId}`;
+        const storageData = await chrome.storage.local.get(["aiProvider", "apiKey", resumeCacheKey]);
+        const cachedResume = storageData[resumeCacheKey];
+        const resumeJson = cachedResume
+            ? (typeof cachedResume === "string" ? cachedResume : JSON.stringify(cachedResume))
+            : "";
+
+        const response = await fetch("http://localhost:8080/api/match-resume", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-AI-API-Key": storageData.apiKey || ""
+            },
+            body: JSON.stringify({
+                userId,
+                jobUrl: job.jobUrl,
+                jobTitle: job.jobTitle,
+                companyName: job.companyName,
+                descriptionText: job.descriptionText,
+                provider: storageData.aiProvider || "gemini",
+                resumeJson
+            })
+        });
+
+        const bodyText = await response.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(bodyText);
+        } catch {
+            parsed = { message: bodyText };
+        }
+
+        if (!response.ok) {
+            matchStatusEl.textContent = `Error (${response.status}): ${parsed.message || "Match failed"}`;
+            return;
+        }
+
+        await chrome.storage.local.set({ [cacheKey]: parsed });
+        renderMatchReport(parsed, false);
+        matchStatusEl.textContent = "Gap analysis complete & cached.";
+    } catch (err) {
+        matchStatusEl.textContent = `Error: ${err.message}`;
+    } finally {
+        matchResumeBtn.disabled = false;
+        forceMatchBtn.disabled = false;
+    }
+}
+matchResumeBtn.addEventListener("click", () => runResumeMatch(false));
+forceMatchBtn.addEventListener("click", () => runResumeMatch(true));
