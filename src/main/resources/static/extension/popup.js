@@ -184,3 +184,120 @@ uploadResumeBtn.addEventListener("click", async () => {
 
 loadResumeBtn.addEventListener("click", loadSavedResume);
 loadSavedResume();
+
+const analyzeJobBtn = document.getElementById("analyzeJobBtn");
+const forceAnalyzeBtn = document.getElementById("forceAnalyzeBtn");
+const scamStatusEl = document.getElementById("scamStatus");
+const scamResultEl = document.getElementById("scamResult");
+
+function renderScamReport(report, fromCache) {
+    const reasonsHtml = (report.reasons || [])
+        .map((r) => `<li>${r}</li>`)
+        .join("");
+
+    scamResultEl.innerHTML = `
+    <div><strong>Verdict:</strong> ${report.verdict} (${report.scamScore}/100)${fromCache ? " <em>(cached)</em>" : ""}</div>
+    ${reasonsHtml ? `<ul style="padding-left: 18px; margin: 6px 0;">${reasonsHtml}</ul>` : ""}
+  `;
+}
+
+async function getActiveTab() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab;
+}
+async function getJobFromTab(tabId) {
+    try {
+        const res = await chrome.tabs.sendMessage(tabId, { type: "SCRAPE_JOB" });
+        if (res) return res;
+    } catch {
+        // Fall through to programmatic injection
+    }
+
+    await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"]
+    });
+
+    return await chrome.tabs.sendMessage(tabId, { type: "SCRAPE_JOB" });
+}
+async function runJobAnalysis(bypassCache = false) {
+    scamStatusEl.textContent = "Inspecting current page...";
+    analyzeJobBtn.disabled = true;
+    forceAnalyzeBtn.disabled = true;
+
+    try {
+        const tab = await getActiveTab();
+        if (!tab || !tab.id) {
+            scamStatusEl.textContent = "No active tab found.";
+            return;
+        }
+
+        const scrapeRes = await getJobFromTab(tab.id);
+        if (!scrapeRes || !scrapeRes.ok) {
+            scamStatusEl.textContent = scrapeRes?.error || "Unable to read job details from this tab.";
+            return;
+        }
+
+        const job = scrapeRes.job;
+        const cacheKey = `scamCache_${job.jobUrl}`;
+
+        if (!bypassCache) {
+            const cached = await chrome.storage.local.get([cacheKey]);
+            if (cached[cacheKey]) {
+                const report = cached[cacheKey];
+                renderScamReport(report, true);
+                scamStatusEl.textContent = "Loaded from local cache.";
+                await chrome.tabs.sendMessage(tab.id, {
+                    type: "RENDER_SCAM_BADGE",
+                    verdict: report.verdict,
+                    scamScore: report.scamScore
+                }).catch(() => {});
+                return;
+            }
+        }
+
+        scamStatusEl.textContent = "Running two-layer scam check...";
+        const prefs = await chrome.storage.local.get(["aiProvider", "apiKey"]);
+
+        const response = await fetch("http://localhost:8080/api/analyze-job", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                ...job,
+                provider: prefs.aiProvider || "gemini",
+                apiKey: prefs.apiKey || ""
+            })
+        });
+
+        const bodyText = await response.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(bodyText);
+        } catch {
+            parsed = { message: bodyText };
+        }
+
+        if (!response.ok) {
+            scamStatusEl.textContent = `Error (${response.status}): ${parsed.message || "Analysis failed"}`;
+            return;
+        }
+
+        await chrome.storage.local.set({ [cacheKey]: parsed });
+        renderScamReport(parsed, false);
+        scamStatusEl.textContent = "Analysis complete & cached.";
+
+        await chrome.tabs.sendMessage(tab.id, {
+            type: "RENDER_SCAM_BADGE",
+            verdict: parsed.verdict,
+            scamScore: parsed.scamScore
+        }).catch(() => {});
+    } catch (err) {
+        scamStatusEl.textContent = `Error: ${err.message}`;
+    } finally {
+        analyzeJobBtn.disabled = false;
+        forceAnalyzeBtn.disabled = false;
+    }
+}
+
+analyzeJobBtn.addEventListener("click", () => runJobAnalysis(false));
+forceAnalyzeBtn.addEventListener("click", () => runJobAnalysis(true));

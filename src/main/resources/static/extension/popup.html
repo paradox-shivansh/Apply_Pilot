@@ -98,7 +98,14 @@
     <button id="saveSettingsBtn" class="action-btn">Save Settings</button>
     <div id="settingsStatus" class="status-text"></div>
 </div>
-
+<div id="scamSection" style="margin-top: 12px;">
+    <button id="analyzeJobBtn" class="action-btn">Analyze This Job</button>
+    <button id="forceAnalyzeBtn" class="action-btn" style="margin-top: 6px; background: #444;">
+        Re-analyze (Bypass Cache)
+    </button>
+    <div id="scamStatus" class="status-text"></div>
+    <div id="scamResult" style="margin-top: 8px; font-size: 12px;"></div>
+</div>
 <div id="resumeSection">
     <input type="file" id="resumeFileInput" accept="application/pdf,.pdf" />
     <button id="uploadResumeBtn" class="action-btn">Upload My Resume</button>
@@ -108,6 +115,7 @@
     <div id="resumeStatus" class="status-text"></div>
     <pre id="resumePreview" style="white-space: pre-wrap; font-size: 11px; max-height: 220px; overflow: auto;"></pre>
 </div>
+
 <script src="popup.js"></script>
 </body>
 </html>
